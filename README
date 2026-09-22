@@ -1,0 +1,107 @@
+# 🧠 Synapse — Language Translator
+
+Synapse is a single-file, client-side web app that translates typed text **and** text found inside images, then lets you export either result as a properly-rendered multi-script PDF.
+
+It runs entirely in the browser (no backend server) using three third-party libraries loaded from a CDN:
+
+| Library | Purpose |
+|---|---|
+| [Tesseract.js](https://github.com/naptha/tesseract.js) | OCR — reads text out of an uploaded image |
+| [MyMemory Translation API](https://mymemory.translated.net/) | Free translation service, called directly from the browser via `fetch` |
+| [jsPDF](https://github.com/parallax/jsPDF) | Builds a downloadable `.pdf` from the translated text |
+
+Google Fonts (Noto Sans + script-specific variants) are loaded to guarantee the PDF can render non-Latin scripts (Hindi, Chinese, Arabic, Japanese, Korean, Bengali, Gujarati, Kannada, Tamil, Telugu) correctly.
+
+---
+
+## Features
+
+- **Text Translation tab** — pick a source/target language pair from 18 supported languages, type or paste text, translate, and swap languages with one click.
+- **Image Translation tab** — upload a photo/screenshot containing text, run OCR to extract it, then translate the extracted text.
+- **Long-text chunking** — text longer than the translation API's query-length limit is automatically split on sentence boundaries, translated piece-by-piece, and reassembled — so there's no hard character cap for the user.
+- **Multi-script PDF export** — download either the text or image translation result as a PDF, with correct glyph rendering for every supported script (not boxes or Latin fallback characters).
+- **Progress feedback** — OCR progress bar and "Translating part X of Y…" status messages for long jobs.
+- **Fully static** — no build step, no server, no API keys; just open the HTML file in a browser.
+
+---
+
+## File Structure
+
+This is a single self-contained HTML file (`index.html`) with three sections:
+
+1. **`<head>`** — CDN `<script>` tags for Tesseract.js and jsPDF, Google Fonts links, and all CSS (dark theme, tabs, responsive grid).
+2. **`<body>`** — markup for the header, the two tabs (`#textSection`, `#imageSection`), language dropdowns, textareas, upload zone, and progress bar.
+3. **`<script>`** — all application logic, organized into four blocks:
+   - Tab switching / status helpers
+   - Chunking helpers + translation calls (MyMemory)
+   - Image OCR (Tesseract) + image translation
+   - PDF generation (font loading, layout, pagination, canvas drawing, jsPDF assembly)
+
+---
+
+## How It Works
+
+### 1. Text Translation
+1. User enters text and picks source/target languages.
+2. `translateText()` validates input, then calls `translateLongText()`.
+3. `translateLongText()` splits the text into ≤450-byte chunks (`splitIntoChunks`) along sentence → word → character boundaries (in that order of preference), calls `translateChunk()` for each chunk sequentially against the MyMemory API, and joins the results.
+4. The result is shown in the read-only output textarea, and the "Download PDF" button is enabled.
+
+### 2. Image Translation
+1. User uploads an image; `readImage()` previews it and runs `Tesseract.recognize()` with the selected OCR language, updating a progress bar via Tesseract's `logger` callback.
+2. Extracted text appears in the "Extracted Text" box.
+3. `translateImageText()` maps the Tesseract language code (e.g. `hin`) to the MyMemory language code (e.g. `hi`) via a lookup table, then reuses the same `translateLongText()` chunking pipeline as the text tab.
+
+### 3. PDF Export
+This is the most involved part of the app, and it exists because of a specific rendering bug (see **Design Notes** below). At a high level:
+1. `waitForFontsToLoad()` asks the browser to load every Noto Sans variant before drawing anything.
+2. `layoutContent()` measures and word-wraps the title + labelled text blocks into a flat list of draw items (text, y-position, font size).
+3. `paginateLayout()` groups those items into A4-sized pages without ever splitting a line across two pages.
+4. Each page is drawn directly onto a `<canvas>` element (in the main document, using the loaded fonts) and converted to a PNG.
+5. Each PNG is embedded into a `jsPDF` document with `addImage()`, one page at a time, and the file is saved.
+
+---
+
+## Design Notes: Why the PDF code looks the way it does
+
+The code comments preserve the debugging history, which is worth understanding:
+
+1. **Attempt 1:** Used jsPDF's built-in `pdf.text()`. Its built-in fonts are Latin-only, so non-Latin scripts rendered as blank boxes.
+2. **Attempt 2:** Switched to jsPDF's `.html()` method (which uses `html2canvas` internally) to let the browser's own font engine draw the glyphs. But the CSS referenced webfont families that were never actually loaded, so the browser silently fell back to a Latin font and captured the *wrong* script into the PDF.
+3. **Attempt 3:** Loaded the correct Google Fonts and awaited them — but `html2canvas` clones the page into a separate hidden iframe to take its snapshot, and dynamically-loaded fonts aren't guaranteed to be available inside that cloned document in time. This produced a **blank PDF**.
+4. **Final fix:** Skip `html2canvas`/`.html()` entirely. Draw text manually onto a `<canvas>` in the *same* document (so the already-loaded fonts definitely apply), do manual word-wrapping (character-by-character for scripts like Chinese/Japanese that don't use spaces), and embed the canvas as a PNG image via `addImage()`. No iframe, no font-timing race.
+
+The code also has a safety check: if a rendered page's PNG data URL is suspiciously short (`< 1500` chars), it throws an error rather than silently shipping a blank page — this is what a blank-canvas failure would otherwise look like.
+
+---
+
+## Setup / Usage
+
+No installation required.
+
+1. Save the file as `index.html`.
+2. Open it in any modern browser (Chrome, Firefox, Edge, Safari).
+3. An internet connection is required for:
+   - Loading Tesseract.js, jsPDF, and Google Fonts from their CDNs
+   - Calling the MyMemory translation API
+   - Tesseract downloading the OCR language data for the language you select
+
+---
+
+## Known Limitations
+
+- **MyMemory free-tier limits**: rate limits and a daily quota apply; very large documents will take longer because chunks are translated **sequentially** (intentional, to be polite to the free API).
+- **OCR accuracy** depends on image quality, font, and the language selected for OCR — it must match the actual language in the image.
+- **No persistence** — refreshing the page clears all text, images, and results (there is no local storage or backend).
+- **Client-exposed API calls** — the MyMemory endpoint is called directly from the browser, so translation requests are visible in the network tab (no secret key is used, since MyMemory's free tier doesn't require one).
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely Cause |
+|---|---|
+| "QUERY LENGTH LIMIT EXCEEDED" | A single chunk is still too large after splitting (rare) — try shortening the text. |
+| Blank/garbled PDF | Internet connection blocked the Google Fonts CDN, or an ad-blocker blocked jsPDF/Tesseract. |
+| "No text found in image" | Wrong OCR language selected, or the image has low contrast/resolution. |
+| Translation fails immediately | Network issue, or MyMemory API is temporarily rate-limiting your IP. |
