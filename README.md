@@ -1,1 +1,0 @@
-# AI-based-text-image-translation-system-using-neural-network
